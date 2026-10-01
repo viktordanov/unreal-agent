@@ -87,8 +87,9 @@ func extendRequestBody(body []byte, extensions map[string]jsontext.Value) ([]byt
 
 func requestInput(items []llm.Item) (openaiapi.InputParam, error) {
 	converted := make(openaiapi.InputParam1, 0, len(items))
+	custom := customCalls(items)
 	for index, item := range items {
-		input, err := requestInputItem(item)
+		input, err := requestInputItem(item, custom)
 		if err != nil {
 			return openaiapi.InputParam{}, fmt.Errorf("input item %d: %w", index, err)
 		}
@@ -102,7 +103,23 @@ func requestInput(items []llm.Item) (openaiapi.InputParam, error) {
 	return input, nil
 }
 
-func requestInputItem(source llm.Item) (openaiapi.InputItem, error) {
+// customCalls returns the call IDs of the custom tool calls in items. The wire
+// pairs a custom tool call with a custom_tool_call_output, so a tool result is
+// encoded by the kind of the call it answers.
+func customCalls(items []llm.Item) map[string]bool {
+	var custom map[string]bool
+	for _, item := range items {
+		if call, ok := item.Data.(llm.ToolCall); ok && call.Custom {
+			if custom == nil {
+				custom = make(map[string]bool)
+			}
+			custom[call.CallID] = true
+		}
+	}
+	return custom
+}
+
+func requestInputItem(source llm.Item, custom map[string]bool) (openaiapi.InputItem, error) {
 	var item openaiapi.InputItem
 	if source.Type == llm.ItemMessage && source.ProviderID == "" {
 		message, ok := source.Data.(llm.Message)
@@ -127,7 +144,7 @@ func requestInputItem(source llm.Item) (openaiapi.InputItem, error) {
 		return item, nil
 	}
 
-	converted, err := requestItem(source)
+	converted, err := requestItem(source, custom)
 	if err != nil {
 		return item, err
 	}
@@ -137,7 +154,7 @@ func requestInputItem(source llm.Item) (openaiapi.InputItem, error) {
 	return item, nil
 }
 
-func requestItem(source llm.Item) (openaiapi.Item, error) {
+func requestItem(source llm.Item, custom map[string]bool) (openaiapi.Item, error) {
 	var item openaiapi.Item
 	switch source.Type {
 	case llm.ItemMessage:
@@ -187,6 +204,21 @@ func requestItem(source llm.Item) (openaiapi.Item, error) {
 		if !ok {
 			return item, fmt.Errorf("tool_call item data must be llm.ToolCall, got %T", source.Data)
 		}
+		if call.Custom {
+			converted := openaiapi.CustomToolCall{
+				CallId: call.CallID,
+				Input:  call.Arguments,
+				Name:   call.Name,
+				Type:   openaiapi.CustomToolCallTypeCustomToolCall,
+			}
+			if source.ProviderID != "" {
+				converted.Id = &source.ProviderID
+			}
+			if err := setUnion(&item, converted); err != nil {
+				return item, err
+			}
+			break
+		}
 		arguments, err := requestToolCallArguments(call.Arguments)
 		if err != nil {
 			return item, fmt.Errorf("encode tool call %q arguments: %w", call.CallID, err)
@@ -228,6 +260,21 @@ func requestItem(source llm.Item) (openaiapi.Item, error) {
 			if err := setUnion(&contents[i], content); err != nil {
 				return item, err
 			}
+		}
+		if custom[output.CallID] {
+			var value openaiapi.CustomToolCallOutput_Output
+			if err := setUnion(&value, contents); err != nil {
+				return item, err
+			}
+			converted := openaiapi.CustomToolCallOutput{
+				CallId: output.CallID,
+				Output: value,
+				Type:   openaiapi.CustomToolCallOutputTypeCustomToolCallOutput,
+			}
+			if err := setUnion(&item, converted); err != nil {
+				return item, err
+			}
+			break
 		}
 		var value openaiapi.FunctionCallOutputItemParam_Output
 		if err := setUnion(&value, contents); err != nil {
@@ -319,6 +366,29 @@ func requestTool(source llm.Tool) (openaiapi.Tool, error) {
 			function.Description = &description
 		}
 		converted = function
+	case llm.ToolCustom:
+		custom := openaiapi.CustomToolParam{
+			Name: source.Name,
+			Type: openaiapi.CustomToolParamTypeCustom,
+		}
+		if source.Description != "" {
+			description := source.Description
+			custom.Description = &description
+		}
+		if source.Grammar != nil {
+			// FromCustomGrammarFormatParam would overwrite the type with the
+			// generated discriminator mapping, which names the Go type.
+			var format openaiapi.CustomToolParam_Format
+			if err := setUnion(&format, openaiapi.CustomGrammarFormatParam{
+				Definition: source.Grammar.Definition,
+				Syntax:     openaiapi.GrammarSyntax1(source.Grammar.Syntax),
+				Type:       openaiapi.Grammar,
+			}); err != nil {
+				return openaiapi.Tool{}, err
+			}
+			custom.Format = &format
+		}
+		converted = custom
 	case llm.ToolHosted:
 		switch source.Name {
 		case "web_search":
