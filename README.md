@@ -1,5 +1,11 @@
 # Unreal Agent
 
+> [!IMPORTANT]
+> Development continues in [viktordanov/uah-core](https://github.com/viktordanov/uah-core)
+> (module `github.com/viktordanov/uah-core`, runner `uah-core-runner`), the
+> runtime of [uah](https://github.com/viktordanov/uah). This fork stays for its
+> history, its tags up to v0.5.2, and the `pr/*` branches offered upstream.
+
 > **This is a fork** of [unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent),
 > carried by [uah](https://github.com/viktordanov/uah) as its agent harness until
 > upstream merges two performance fixes. It is upstream `main` with those fixes,
